@@ -3,7 +3,7 @@ import json
 
 app = FastAPI()
 
-VERIFY_TOKEN = "EAAdBd2IXiUkBOZBs9RRPlvsvMsBTwgvemKR7Y9NMjtzdyV30dCZAT30PNocKR6tZBIraIaJu6rvn5lT2IgiLV5XAWIykKnEMShW9Fej3MCTQxhg7RwBGG5NvpQlEHEYfsDgHZBnjMIihdk62Bfx9gk9nMdnWYdPP7OQIZBDMZAkWOwH3hkDrM3RInkE1tfU0kbdq1RPZBptWFSqPXtdinqLBCZAxNA67MDqjhy4ZD"
+VERIFY_TOKEN = ""
 
 @app.get("/webhook")
 async def verify(request: Request):
