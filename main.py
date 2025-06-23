@@ -3,6 +3,7 @@ from whatsapp_handler import handle_whatsapp_webhook
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 import os
+import uvicorn
 
 load_dotenv()
 
@@ -31,3 +32,8 @@ async def verify(request: Request):
 @app.get("/")
 def root():
     return {"message": "BigBell WhatsApp Bot is running!"}
+
+# ✅ MAIN ENTRYPOINT FOR RAILWAY
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))  # use Railway's dynamic port
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
