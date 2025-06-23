@@ -56,3 +56,17 @@ def get_job_status(job_name):
     except Exception as e:
         logging.error(f"Error getting status for job '{job_name}': {e}")
         return "ERROR"
+
+def get_latest_build_number(job_name):
+    url = f"{JENKINS_URL}/job/{job_name}/lastBuild/api/json"
+    try:
+        res = requests.get(url, auth=(JENKINS_USERNAME, JENKINS_TOKEN), timeout=5)
+        if res.status_code == 200:
+            data = res.json()
+            return data.get("number")
+        else:
+            logging.error(f"Failed to get build number. Status Code: {res.status_code}")
+            return None
+    except Exception as e:
+        logging.error(f"Error getting build number for job '{job_name}': {e}")
+        return None

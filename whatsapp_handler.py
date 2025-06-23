@@ -3,13 +3,19 @@ import os
 import logging
 import json
 import traceback
+import time
 
 from sessions import get_session, set_session
-from jenkins_handler import get_all_jobs, get_jobs_by_customer, trigger_build, get_job_status
+from jenkins_handler import (
+    get_all_jobs,
+    get_jobs_by_customer,
+    trigger_build,
+    get_job_status,
+    get_latest_build_number
+)
 
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 PHONE_ID = os.getenv("PHONE_ID")
-
 CUSTOMERS = ["goognu", "hiringgo"]
 
 async def send_whatsapp_message(phone_id, token, payload):
@@ -28,6 +34,14 @@ async def send_whatsapp_message(phone_id, token, payload):
         print("Unexpected error:", ex)
         traceback.print_exc()
 
+def wait_for_latest_build_number(job_name, retries=5, delay=2):
+    for _ in range(retries):
+        build_number = get_latest_build_number(job_name)
+        if build_number:
+            return build_number
+        time.sleep(delay)
+    return None
+
 async def handle_whatsapp_webhook(body, db):
     try:
         messages = body.get("entry", [])[0].get("changes", [])[0].get("value", {}).get("messages", [])
@@ -37,7 +51,7 @@ async def handle_whatsapp_webhook(body, db):
         message = messages[0]
         phone = message["from"]
 
-        # --- UNIFIED HANDLING FOR ALL REPLY TYPES ---
+        # --- Extract message text ---
         text = ""
         if "interactive" in message:
             interactive = message["interactive"]
@@ -45,17 +59,15 @@ async def handle_whatsapp_webhook(body, db):
                 text = interactive["button_reply"]["id"].lower().strip()
             elif "list_reply" in interactive:
                 text = interactive["list_reply"]["id"].lower().strip()
-        elif "button_reply" in message:  # fallback for older payloads
+        elif "button_reply" in message:
             text = message["button_reply"]["id"].lower().strip()
         elif "text" in message:
             text = message["text"]["body"].lower().strip()
-        else:
-            text = ""  # fallback
 
         session = await get_session(db, phone)
         step = session.get("step")
 
-        # Step 1: Greet and show customer options
+        # Step 1: Initial greeting
         if text == "hi" or not step:
             await set_session(db, phone, {"step": "select_customer"})
             await send_whatsapp_message(PHONE_ID, WHATSAPP_TOKEN, {
@@ -90,7 +102,6 @@ async def handle_whatsapp_webhook(body, db):
                     })
                     return {"status": "no jobs"}
                 await set_session(db, phone, {"step": "select_job", "customer": selected, "jobs": jobs})
-                # WhatsApp allows max 3 buttons per message
                 buttons = [{"type": "reply", "reply": {"id": job, "title": job}} for job in jobs[:3]]
                 await send_whatsapp_message(PHONE_ID, WHATSAPP_TOKEN, {
                     "messaging_product": "whatsapp",
@@ -113,10 +124,7 @@ async def handle_whatsapp_webhook(body, db):
                         "text": {"body": "No jobs found. Type 'hi' to restart."}
                     })
                     return {"status": "no jobs"}
-                # WhatsApp API: List message can have up to 10 rows per section[4][6]
-                rows = []
-                for job in jobs[:10]:
-                    rows.append({"id": job, "title": job})
+                rows = [{"id": job, "title": job} for job in jobs[:10]]
                 await set_session(db, phone, {"step": "select_job", "customer": "custom", "jobs": jobs})
                 await send_whatsapp_message(PHONE_ID, WHATSAPP_TOKEN, {
                     "messaging_product": "whatsapp",
@@ -128,12 +136,7 @@ async def handle_whatsapp_webhook(body, db):
                         "body": {"text": "Choose a job to trigger or check status."},
                         "action": {
                             "button": "Show Jobs",
-                            "sections": [
-                                {
-                                    "title": "All Jenkins Jobs",
-                                    "rows": rows
-                                }
-                            ]
+                            "sections": [{"title": "All Jenkins Jobs", "rows": rows}]
                         }
                     }
                 })
@@ -181,35 +184,58 @@ async def handle_whatsapp_webhook(body, db):
         # Step 4: Job action
         if step == "job_action":
             job_name = session.get("job_name")
+
             if text == "trigger":
                 triggered = trigger_build(job_name)
-                status = get_job_status(job_name) if triggered else "Failed to trigger"
-                await send_whatsapp_message(PHONE_ID, WHATSAPP_TOKEN, {
-                    "messaging_product": "whatsapp",
-                    "to": phone,
-                    "type": "text",
-                    "text": {"body": f"Job '{job_name}' triggered.\nStatus: {status}\nType 'hi' to restart."}
-                })
+
+                if triggered:
+                    build_number = wait_for_latest_build_number(job_name) or "N/A"
+                    status = get_job_status(job_name) or "IN_PROGRESS"
+
+                    await send_whatsapp_message(PHONE_ID, WHATSAPP_TOKEN, {
+                        "messaging_product": "whatsapp",
+                        "to": phone,
+                        "type": "text",
+                        "text": {
+                            "body": (
+                                f"✅ Job *'{job_name}'* triggered successfully!\n"
+                                f"📦 *Build Number:* #{build_number}\n"
+                                f"⏱️ *Status:* {status}\n\n"
+                                f"Type *hi* to restart or choose another job."
+                            )
+                        }
+                    })
+                else:
+                    await send_whatsapp_message(PHONE_ID, WHATSAPP_TOKEN, {
+                        "messaging_product": "whatsapp",
+                        "to": phone,
+                        "type": "text",
+                        "text": {"body": f"❌ Failed to trigger job '{job_name}'. Type 'hi' to try again."}
+                    })
+
                 await set_session(db, phone, {})
                 return {"status": "triggered"}
+
             elif text == "status":
                 status = get_job_status(job_name)
                 await send_whatsapp_message(PHONE_ID, WHATSAPP_TOKEN, {
                     "messaging_product": "whatsapp",
                     "to": phone,
                     "type": "text",
-                    "text": {"body": f"Job '{job_name}' status: {status}\nType 'hi' to restart."}
+                    "text": {"body": f"📈 Job '{job_name}' status: {status}\nType 'hi' to restart."}
                 })
                 return {"status": "status"}
+
             elif text == "terminate":
                 await send_whatsapp_message(PHONE_ID, WHATSAPP_TOKEN, {
                     "messaging_product": "whatsapp",
                     "to": phone,
                     "type": "text",
-                    "text": {"body": "Session terminated. Type 'hi' to start again."}
+                    "text": {"body": "🛑 Session terminated. Type 'hi' to start again."}
                 })
                 await set_session(db, phone, {})
                 return {"status": "terminated"}
+
             else:
                 await send_whatsapp_message(PHONE_ID, WHATSAPP_TOKEN, {
                     "messaging_product": "whatsapp",
@@ -220,6 +246,7 @@ async def handle_whatsapp_webhook(body, db):
                 return {"status": "invalid action"}
 
         return {"status": "handled"}
+
     except Exception as ex:
         print("Error in handle_whatsapp_webhook:", ex)
         traceback.print_exc()
